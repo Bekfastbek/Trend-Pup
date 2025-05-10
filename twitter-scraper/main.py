@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
 Main entry point for the Twitter scraper and cryptocurrency analyzer
+Runs the SoneFi scraper every 10 minutes and the Twitter scraper with Gemini analysis every hour
 """
 
 import asyncio
 import os
 import logging
 import sys
+import time
+import signal
 from datetime import datetime
 
 # Set up logging
@@ -24,6 +27,20 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Global flag for graceful shutdown
+running = True
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C and other termination signals"""
+    global running
+    logger.info("Received termination signal. Shutting down gracefully...")
+    running = False
+    print("\nShutting down gracefully. Please wait...")
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 def print_header():
     """Print a header for the application"""
@@ -149,14 +166,78 @@ async def update_sonefi_data():
         
     return True
 
+async def run_scheduled_tasks():
+    """Run tasks according to schedule"""
+    global running
+    
+    # Track when tasks were last run
+    last_sonefi_run = 0
+    last_twitter_run = 0
+    
+    # Time intervals in seconds
+    sonefi_interval = 10 * 60  # 10 minutes
+    twitter_interval = 60 * 60  # 1 hour
+    
+    logger.info("Starting scheduled tasks...")
+    logger.info(f"SoneFi scraper will run every {sonefi_interval//60} minutes")
+    logger.info(f"Twitter scraper and analysis will run every {twitter_interval//60} minutes")
+    
+    print(f"\n[INFO] Scheduler started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[INFO] SoneFi scraper will run every 10 minutes")
+    print(f"[INFO] Twitter scraper + analysis will run every 60 minutes")
+    print("[INFO] Press Ctrl+C to stop\n")
+    
+    # Run SoneFi scraper immediately on startup
+    await update_sonefi_data()
+    last_sonefi_run = time.time()
+    
+    try:
+        while running:
+            current_time = time.time()
+            
+            # Check if it's time to run the SoneFi scraper
+            if current_time - last_sonefi_run >= sonefi_interval:
+                logger.info("Running scheduled SoneFi token update...")
+                await update_sonefi_data()
+                last_sonefi_run = current_time
+            
+            # Check if it's time to run the Twitter scraper and analysis
+            if current_time - last_twitter_run >= twitter_interval:
+                logger.info("Running scheduled Twitter scraper and analysis...")
+                await run_scraper()
+                last_twitter_run = current_time
+            
+            # Sleep for a bit to avoid high CPU usage
+            await asyncio.sleep(30)
+            
+    except Exception as e:
+        logger.error(f"Error in scheduler: {e}", exc_info=True)
+        print(f"\n[ERROR] Scheduler encountered an error: {e}")
+    
+    logger.info("Scheduler stopped")
+    print("\n[INFO] Scheduler stopped")
+
 async def main():
     """Main entry point"""
-    if len(sys.argv) > 1 and sys.argv[1] == "--update-data":
-        # Update Sonefi token data
-        await update_sonefi_data()
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--update-data":
+            # Update Sonefi token data only
+            await update_sonefi_data()
+        elif sys.argv[1] == "--full-run":
+            # Run the complete Twitter scraper and analyzer once
+            await run_scraper()
+        elif sys.argv[1] == "--schedule":
+            # Run in scheduled mode
+            await run_scheduled_tasks()
+        else:
+            print(f"Unknown argument: {sys.argv[1]}")
+            print("Available options:")
+            print("  --update-data  : Update SoneFi token data only")
+            print("  --full-run     : Run complete Twitter scraper and analysis once")
+            print("  --schedule     : Run in scheduled mode (default)")
     else:
-        # Run the Twitter scraper and analyzer
-        await run_scraper()
+        # Default to scheduled mode
+        await run_scheduled_tasks()
 
 if __name__ == "__main__":
     asyncio.run(main())
