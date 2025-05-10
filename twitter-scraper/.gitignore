@@ -1,9 +1,8 @@
 # Twitter scraper specific files
-twitter_cookies.json
 twitter_data.json
 analyzed_memecoins.json
 scraper_config.json
-
+twitter_cookies.json
 # Python specific
 __pycache__/
 *.py[cod]

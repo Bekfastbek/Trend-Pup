@@ -1,491 +1,426 @@
-import asyncio
 import json
-import os
+import time
+import logging
+import asyncio
 import re
-from playwright.async_api import async_playwright, TimeoutError
+import os
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
-async def extract_token_links_directly():
-    """
-    Opens the Sonefi memeLaunch page in headless browser and extracts token links directly 
-    from the DOM using various methods to identify token elements.
-    """
-    print("Starting Playwright in headless mode...")
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        )
-        
-        page = await context.new_page()
-        
-        # Create directory for data if it doesn't exist
-        os.makedirs("data", exist_ok=True)
-        
-        print("Navigating to https://sonefi.xyz/#/memeLaunch")
-        await page.goto("https://sonefi.xyz/#/memeLaunch", wait_until="domcontentloaded", timeout=60000)
-        print("Initial page load complete")
-        
-        # Wait a bit for JavaScript to run
-        await asyncio.sleep(5)
-        
-        # Take screenshot of initial state
-        await page.screenshot(path="initial_state.png")
-        print("Saved screenshot of initial state to initial_state.png")
-        
-        # Save the HTML for analysis
-        html_content = await page.content()
-        with open("data/page_html.html", "w", encoding="utf-8") as f:
-            f.write(html_content)
-        print("Saved page HTML to data/page_html.html for inspection")
-        
-        # Scroll to load all tokens
-        print("Scrolling to load all content...")
-        for i in range(5):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(2)
-            print(f"Scroll {i+1}/5 completed")
-        
-        # Take screenshot after scrolling
-        await page.screenshot(path="after_scrolling.png")
-        print("Saved screenshot after scrolling to after_scrolling.png")
-        
-        # First, analyze the page to find potential token elements using multiple selectors
-        # Fix: Escape quotes within the JavaScript string
-        potential_selectors = [
-            '.market-list-item-new',
-            'div[class*="market"]',
-            'div[class*="item"]', 
-            'div[class*="card"]',
-            'div[class*="token"]',
-            'div[class*="list-item"]',
-            'div[role="button"]',
-            'a[href*="/token/"]',
-            'a[href*="/erc20token/"]'
-        ]
-        
-        selector_counts = {}
-        for selector in potential_selectors:
-            # Fix: Properly escape the selector for JavaScript
-            escaped_selector = selector.replace('"', '\\"')
-            count = await page.evaluate(f'() => document.querySelectorAll("{escaped_selector}").length')
-            selector_counts[selector] = count
-            print(f"Selector '{selector}' matched {count} elements")
-        
-        # Identify the most promising selectors
-        promising_selectors = [s for s, count in selector_counts.items() if count > 0]
-        print(f"Promising selectors: {promising_selectors}")
-        
-        # Extract all elements with hex addresses in them
-        elements_with_addresses = await page.evaluate('''
-            () => {
-                const result = [];
-                const hexPattern = /0x[a-fA-F0-9]{40}/g;
-                
-                // Find all elements that might contain token addresses
-                const allElements = document.querySelectorAll('*');
-                for (const element of allElements) {
-                    try {
-                        // Check element text content
-                        const text = element.textContent;
-                        if (!text) continue;
-                        const matches = text.match(hexPattern);
-                        
-                        if (matches) {
-                            // Check if this is likely a token card/item
-                            const isCard = element.className && element.className.includes && 
-                                          (element.className.includes('card') || 
-                                          element.className.includes('item') ||
-                                          element.className.includes('token')) ||
-                                          element.tagName === 'A' ||
-                                          element.getAttribute('role') === 'button';
-                            
-                            if (isCard) {
-                                result.push({
-                                    address: matches[0],
-                                    text: text.substring(0, 100),
-                                    tagName: element.tagName,
-                                    className: element.className,
-                                    id: element.id,
-                                    href: element.getAttribute('href'),
-                                    isClickable: element.onclick != null || 
-                                               element.tagName === 'A' || 
-                                               element.getAttribute('role') === 'button'
-                                });
-                            }
-                        }
-                        
-                        // Check for href attributes containing token addresses
-                        const href = element.getAttribute('href');
-                        if (href && (href.includes('/token/') || href.includes('/erc20token/'))) {
-                            const parts = href.split('/');
-                            const lastPart = parts[parts.length - 1];
-                            if (lastPart.match(/^0x[a-fA-F0-9]{40}$/)) {
-                                result.push({
-                                    address: lastPart,
-                                    text: element.textContent ? element.textContent.substring(0, 100) : '',
-                                    tagName: element.tagName,
-                                    className: element.className,
-                                    id: element.id,
-                                    href: href,
-                                    isClickable: true
-                                });
-                            }
-                        }
-                        
-                        // Check for data attributes containing token addresses
-                        if (element.attributes) {
-                            for (const attr of element.attributes) {
-                                if (attr.name && attr.name.startsWith('data-') && 
-                                    attr.value && attr.value.match(/^0x[a-fA-F0-9]{40}$/)) {
-                                    result.push({
-                                        address: attr.value,
-                                        text: element.textContent ? element.textContent.substring(0, 100) : '',
-                                        tagName: element.tagName,
-                                        className: element.className,
-                                        id: element.id,
-                                        attrName: attr.name,
-                                        href: element.getAttribute('href'),
-                                        isClickable: element.onclick != null || 
-                                                   element.tagName === 'A' || 
-                                                   element.getAttribute('role') === 'button'
-                                    });
-                                }
-                            }
-                        }
-                    } catch (error) {
-                        console.error("Error processing element:", error);
-                    }
-                }
-                
-                // Remove duplicates based on address
-                const uniqueAddresses = new Set();
-                return result.filter(item => {
-                    if (uniqueAddresses.has(item.address)) {
-                        return false;
-                    }
-                    uniqueAddresses.add(item.address);
-                    return true;
-                });
-            }
-        ''')
-        
-        print(f"Found {len(elements_with_addresses)} elements containing token addresses")
-        
-        # Save the elements with addresses to a JSON file
-        with open("data/elements_with_addresses.json", "w") as f:
-            json.dump(elements_with_addresses, f, indent=2)
-        print("Saved elements with addresses to data/elements_with_addresses.json")
-        
-        # Extract token URLs from the elements with addresses
-        token_links = []
-        for element in elements_with_addresses:
-            address = element.get('address')
-            if address:
-                # Construct token URL from address
-                token_url = f"https://sonefi.xyz/#/erc20token/{address}"
-                if token_url not in token_links:
-                    token_links.append(token_url)
-        
-        # If we didn't find any token links, try a more aggressive approach
-        if not token_links:
-            print("No token links found using primary method, trying alternative approach...")
-            
-            # Look for any clickable elements and capture their HTML
-            clickable_elements = await page.evaluate('''
-                () => {
-                    const result = [];
-                    try {
-                        // Find all potentially clickable elements
-                        const elements = Array.from(document.querySelectorAll('a, [onclick], [role="button"], div[class*="item"], div[class*="card"]'));
-                        elements.forEach(el => {
-                            try {
-                                const outerHTML = el.outerHTML || '';
-                                const innerHTML = el.innerHTML || '';
-                                const textContent = el.textContent ? el.textContent.trim() : '';
-                                
-                                result.push({
-                                    outerHTML: outerHTML.substring(0, 200) + (outerHTML.length > 200 ? '...' : ''),
-                                    innerHTML: innerHTML.substring(0, 100) + (innerHTML.length > 100 ? '...' : ''),
-                                    textContent: textContent.substring(0, 100) + (textContent.length > 100 ? '...' : ''),
-                                    tagName: el.tagName,
-                                    className: el.className,
-                                    id: el.id,
-                                    href: el.getAttribute('href'),
-                                    style: el.getAttribute('style'),
-                                    hasChildren: el.children ? el.children.length > 0 : false
-                                });
-                            } catch (innerError) {
-                                console.error("Error processing element:", innerError);
-                            }
-                        });
-                    } catch (error) {
-                        console.error("Error in clickable elements extraction:", error);
-                    }
-                    return result;
-                }
-            ''')
-            
-            print(f"Found {len(clickable_elements)} potentially clickable elements")
-            with open("data/clickable_elements.json", "w") as f:
-                json.dump(clickable_elements, f, indent=2, default=str)
-            
-            # Try to extract addresses from the clickable elements
-            hex_pattern = r'0x[a-fA-F0-9]{40}'
-            
-            for element in clickable_elements:
-                html = element.get('outerHTML', '')
-                matches = re.findall(hex_pattern, html)
-                for match in matches:
-                    token_url = f"https://sonefi.xyz/#/erc20token/{match}"
-                    if token_url not in token_links:
-                        token_links.append(token_url)
-        
-        # Save just the token URLs
-        with open("data/token_links.json", "w") as f:
-            json.dump(token_links, f, indent=2)
-        print(f"Saved {len(token_links)} token links to data/token_links.json")
-        
-        # Take a screenshot of the final state
-        await page.screenshot(path="extraction_complete.png")
-        print("Final screenshot saved as extraction_complete.png")
-        
-        # Try a basic check - find any links on the page
-        all_links = await page.evaluate('''
-            () => {
-                const links = [];
-                try {
-                    const anchors = document.querySelectorAll('a');
-                    for (const anchor of anchors) {
-                        if (anchor.href) {
-                            links.push({
-                                href: anchor.href,
-                                text: anchor.textContent ? anchor.textContent.trim().substring(0, 50) : ''
-                            });
-                        }
-                    }
-                } catch (error) {
-                    console.error("Error extracting links:", error);
-                }
-                return links;
-            }
-        ''')
-        
-        print(f"Found {len(all_links)} anchor tags on the page")
-        with open("data/all_page_links.json", "w") as f:
-            json.dump(all_links, f, indent=2)
-        print("Saved all page links to data/all_page_links.json")
-        
-        await browser.close()
-        print("Browser closed")
-        
-        return token_links
+# Set up paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+LOGS_DIR = os.path.join(DATA_DIR, "logs")
 
-async def extract_token_links_by_clicking():
-    """
-    Opens the Sonefi memeLaunch page in headless browser and extracts token links by 
-    clicking on each token element and capturing the resulting URL.
-    """
-    print("Starting Playwright in headless mode...")
-    async with async_playwright() as p:
-        # Launch a new browser with increased timeout
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        )
-        
-        # Create a new page with increased timeout
-        page = await context.new_page()
-        page.set_default_navigation_timeout(60000)
-        page.set_default_timeout(60000)
-        
-        # Create directory for data if it doesn't exist
-        os.makedirs("data", exist_ok=True)
-        
-        print("Navigating to https://sonefi.xyz/#/memeLaunch")
-        await page.goto("https://sonefi.xyz/#/memeLaunch", wait_until="domcontentloaded", timeout=60000)
-        print("Initial page load complete")
-        
-        # Wait for JavaScript to run
-        await asyncio.sleep(5)
-        
-        # Take screenshot of initial state
-        await page.screenshot(path="initial_state.png")
-        print("Saved initial state screenshot")
-        
-        # Scroll to load all tokens
-        print("Scrolling to load all content...")
-        for i in range(5):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(2)
-            print(f"Scroll {i+1}/5 completed")
-        
-        # Take screenshot after scrolling
-        await page.screenshot(path="after_scrolling.png")
-        print("Saved after scrolling screenshot")
-        
-        # The selector that matched 48 elements, which is likely the token elements
-        token_selector = '.market-list-item-new'
-        
-        # Count the elements again to confirm
-        count = await page.evaluate(f'() => document.querySelectorAll("{token_selector}").length')
-        print(f"Found {count} token elements with selector '{token_selector}'")
-        
-        # Get initial URL to check for navigation
-        initial_url = page.url
-        print(f"Initial URL: {initial_url}")
-        
-        # Create a new context for testing individual tokens
-        test_context = await browser.new_context(viewport={"width": 1280, "height": 900})
-        
-        # Store token links
-        token_links = []
-        
-        # Loop through each token element and try to click it
-        for i in range(count):
-            print(f"\nProcessing token {i+1}/{count}...")
-            
-            # Create a new page for each token to avoid navigation state issues
-            test_page = await test_context.new_page()
-            test_page.set_default_navigation_timeout(30000)
-            
-            # Navigate to the main page
-            await test_page.goto("https://sonefi.xyz/#/memeLaunch", wait_until="domcontentloaded")
-            
-            # Wait a moment for the page to stabilize
-            await asyncio.sleep(2)
-            
-            # Scroll to load all tokens
-            for j in range(3):
-                await test_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(1)
-            
-            # Take a screenshot to debug (only for the first few tokens)
-            if i < 5:
-                await test_page.screenshot(path=f"token_{i+1}_before_click.png")
-                
-            try:
-                # First, get some information about the element before clicking
-                element_info = await test_page.evaluate(f'''
-                    () => {{
-                        const elements = document.querySelectorAll('{token_selector}');
-                        if ({i} >= elements.length) return null;
-                        const element = elements[{i}];
-                        
-                        // Get the element text
-                        const text = element.textContent.trim();
-                        
-                        // Get elements position
-                        const rect = element.getBoundingClientRect();
-                        
-                        return {{
-                            text: text,
-                            position: {{
-                                x: rect.x + rect.width/2,
-                                y: rect.y + rect.height/2
-                            }},
-                            width: rect.width,
-                            height: rect.height
-                        }};
-                    }}
-                ''')
-                
-                if not element_info:
-                    print(f"Could not find element {i+1}")
-                    continue
-                    
-                print(f"Found token element with text: {element_info.get('text', '')[:30]}")
-                
-                # Scroll the element into view
-                await test_page.evaluate(f'''
-                    () => {{
-                        const elements = document.querySelectorAll('{token_selector}');
-                        if ({i} < elements.length) {{
-                            elements[{i}].scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-                        }}
-                        return true;
-                    }}
-                ''')
-                
-                # Wait for scrolling to complete
-                await asyncio.sleep(1)
-                
-                # Try clicking the element with JavaScript first
-                clicked = await test_page.evaluate(f'''
-                    () => {{
-                        try {{
-                            const elements = document.querySelectorAll('{token_selector}');
-                            if ({i} >= elements.length) return false;
-                            elements[{i}].click();
-                            return true;
-                        }} catch (e) {{
-                            console.error("Click error:", e);
-                            return false;
-                        }}
-                    }}
-                ''')
-                
-                if not clicked:
-                    print(f"Could not click token {i+1} with JavaScript")
-                    
-                    # Try clicking using Playwright's built-in click 
-                    # by position instead of by element reference
-                    if element_info and 'position' in element_info:
-                        x = element_info['position']['x']
-                        y = element_info['position']['y']
-                        print(f"Trying to click at position ({x}, {y})")
-                        
-                        await test_page.mouse.click(x, y)
-                        print(f"Clicked at position ({x}, {y})")
-                
-                # Wait a moment for navigation to occur
-                await asyncio.sleep(3)
-                
-                # Capture the new URL
-                current_url = test_page.url
-                
-                # Check if navigation occurred
-                if current_url != "https://sonefi.xyz/#/memeLaunch":
-                    print(f"Navigation detected! New URL: {current_url}")
-                    token_links.append(current_url)
-                else:
-                    print(f"No navigation detected for token {i+1}")
-                
-                # Take a screenshot after clicking (only for the first few tokens)
-                if i < 5:
-                    await test_page.screenshot(path=f"token_{i+1}_after_click.png")
-                    
-            except Exception as e:
-                print(f"Error processing token {i+1}: {e}")
-            
-            # Close the test page
-            await test_page.close()
-            
-        # Close the test context
-        await test_context.close()
-        
-        # Save the token links to a file
-        with open("data/token_links.json", "w") as f:
-            json.dump(token_links, f, indent=2)
-        print(f"\nSaved {len(token_links)} token links to data/token_links.json")
-        
-        # Close the browser
-        await browser.close()
-        print("Browser closed")
-        
-        return token_links
+# Create logs directory if it doesn't exist
+os.makedirs(LOGS_DIR, exist_ok=True)
 
-async def main():
+# Configure logging
+logging.basicConfig(
+    filename=os.path.join(LOGS_DIR, 'sonefi_scraper.log'),
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Define the number of concurrent tasks
+CONCURRENT_TASKS = 3
+
+async def setup_browser():
+    """Set up and return a configured Playwright browser instance"""
     try:
-        links = await extract_token_links_by_clicking()
-        print("\nExtracted token links:")
-        for link in links:
-            print(link)
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.launch(headless=True)
+        return playwright, browser
     except Exception as e:
-        print(f"An error occurred in the main function: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.error(f"Error setting up Playwright: {e}")
+        return None, None
 
+async def extract_token_data(browser, url, semaphore):
+    """Extract text specifically from the token-market-info div"""
+    page = None
+    context = None
+    
+    async with semaphore:  # Use semaphore to limit concurrent requests
+        try:
+            logging.info(f"Processing URL: {url}")
+            
+            # Create a new browser context for this extraction
+            context = await browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            )
+            page = await context.new_page()
+            
+            # Navigate to the page with a longer timeout
+            await page.goto(url, wait_until='networkidle', timeout=90000)
+            
+            # Wait longer for React app to fully render
+            logging.info(f"Waiting for React content to load for {url}")
+            await page.wait_for_timeout(15000)  # 15 seconds
+            
+            # Extract the token address from URL
+            token_address = url.split('/')[-1]
+            
+            # Extract text directly from the div.token-market-info element shown in the screenshot
+            token_info_text = await page.evaluate('''() => {
+                // Target the exact element shown in the screenshot - a blue bar with token info
+                const tokenMarketInfoDiv = document.querySelector('div.token-market-info') || 
+                                          document.querySelector('[class*="token-market-info"]');
+                    
+                // If we can't find that specific element, look for something with similar style
+                // Based on the screenshot, it's a blue bar with Price, Market Cap, etc.
+                if (!tokenMarketInfoDiv) {
+                    // Try to find the element based on its visual appearance or content
+                    const allDivs = Array.from(document.querySelectorAll('div'));
+                    const infoDiv = allDivs.find(div => {
+                        const text = div.innerText || '';
+                        return text.includes('Price') && 
+                               text.includes('Market Cap') && 
+                               text.includes('Virtual Liquidity') &&
+                               text.includes('24H Volume');
+                    });
+                    
+                    if (infoDiv) {
+                        return infoDiv.innerText;
+                    }
+                } else {
+                    return tokenMarketInfoDiv.innerText;
+                }
+                
+                // If all else fails, return null
+                return null;
+            }''')
+            
+            # Extract the token name shown in the blue header area
+            token_name = await page.evaluate('''() => {
+                // Look for the token name element - typically a heading/title in the blue bar section
+                // From the screenshot, we can see it looks like "KIFCOIN ($KIF)"
+                const headingElements = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, div.token-name, div[class*="-title"], div[class*="title-"], span[class*="title"]'));
+                
+                for (const element of headingElements) {
+                    const text = element.innerText || '';
+                    // If text contains format like "NAME ($SYMBOL)"
+                    if (text.includes('(') && text.includes(')') && text.includes('$')) {
+                        return text.trim();
+                    }
+                    // or just a token name with $ symbol (like $ETH)
+                    else if (text.includes('$') && text.length < 30) {
+                        return text.trim();
+                    }
+                }
+                
+                // Alternative approach - look for elements with larger font size in the token info area
+                const largeTextElements = Array.from(document.querySelectorAll('div, span, p'))
+                    .filter(el => {
+                        const computedStyle = window.getComputedStyle(el);
+                        const fontSize = parseInt(computedStyle.fontSize);
+                        return fontSize > 16 && el.innerText && el.innerText.length < 50;
+                    });
+                    
+                for (const element of largeTextElements) {
+                    const text = element.innerText || '';
+                    if ((text.includes('$') || text.includes('(') && text.includes(')'))) {
+                        return text.trim();
+                    }
+                }
+                
+                // If still can't find, try a more general approach
+                const allElements = Array.from(document.querySelectorAll('*'));
+                const possibleNameElement = allElements.find(el => {
+                    const text = el.innerText || '';
+                    return text.includes('$') && text.length < 50 && 
+                           !text.includes('Price') && !text.includes('Market Cap');
+                });
+                
+                return possibleNameElement ? possibleNameElement.innerText.trim() : null;
+            }''')
+            
+            # Create a token data object with the extracted text
+            token_data = {
+                "token_address": token_address,
+                "url": url,
+                "token_name": token_name or "Unknown Token",
+                "token_info_text": token_info_text or "No token market info found"
+            }
+            
+            # Format the token data
+            formatted_token = format_token_data(token_data)
+            
+            logging.info(f"Successfully extracted and formatted token info for: {token_address}")
+            return formatted_token
+            
+        except PlaywrightTimeoutError:
+            logging.error(f"Timeout waiting for page to load: {url}")
+            return {"url": url, "token_address": url.split('/')[-1], "token_name": "Unknown Token", "error": "Timeout waiting for page to load"}
+        except Exception as e:
+            logging.error(f"Error extracting data from {url}: {e}")
+            return {"url": url, "token_address": url.split('/')[-1], "token_name": "Unknown Token", "error": str(e)}
+        finally:
+            # Clean up resources
+            if page:
+                await page.close()
+            if context:
+                await context.close()
+
+def format_token_data(token_data):
+    """Format raw token data into structured data"""
+    # Start with the token address and URL
+    formatted_token = {
+        "token_address": token_data["token_address"],
+        "url": token_data["url"]
+    }
+    
+    # Process token name if available
+    if "token_name" in token_data and token_data["token_name"]:
+        formatted_token["token_name"] = token_data["token_name"]
+        
+        # Try to extract token symbol from name (format typically: "NAME ($SYMBOL)")
+        try:
+            if "(" in token_data["token_name"] and ")" in token_data["token_name"] and "$" in token_data["token_name"]:
+                symbol_match = re.search(r'\(\$([^)]+)\)', token_data["token_name"])
+                if symbol_match:
+                    formatted_token["token_symbol"] = symbol_match.group(1)
+            # Handle case where name is just $SYMBOL
+            elif token_data["token_name"].startswith("$") and " " not in token_data["token_name"]:
+                formatted_token["token_symbol"] = token_data["token_name"][1:]  # Remove $ prefix
+        except Exception as e:
+            logging.warning(f"Error extracting token symbol: {e}")
+    
+    # If there's no token_info_text or there was an error, return early
+    if "token_info_text" not in token_data or token_data["token_info_text"] == "No token market info found":
+        if "error" in token_data:
+            formatted_token["error"] = token_data["error"]
+        else:
+            formatted_token["error"] = "No token info found"
+        return formatted_token
+    
+    # Parse the token info text
+    token_info_text = token_data["token_info_text"]
+    lines = token_info_text.strip().split('\n')
+    
+    # Process each line to extract the data
+    current_field = None
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        
+        # Skip empty lines
+        if not line:
+            continue
+            
+        # Check if this is a header line (field name)
+        if line.startswith('Price '):
+            current_field = 'price'
+            # Extract percentage change
+            match = re.search(r'Price\s+([+-]?\d+\.?\d*)%', line)
+            if match:
+                try:
+                    formatted_token["price_change_percentage"] = float(match.group(1))
+                except (ValueError, TypeError):
+                    formatted_token["price_change_percentage"] = None
+        elif line == 'Market Cap':
+            current_field = 'market_cap'
+        elif line == 'Virtual Liquidity':
+            current_field = 'virtual_liquidity'
+        elif line == '24H Volume':
+            current_field = '24h_volume'
+        elif line == 'Token Created':
+            current_field = 'token_created'
+        # This is a value line
+        elif current_field == 'price' and (line.startswith('$') or line.startswith('0.')):
+            # Handle price value
+            if 'ASTR' in line:
+                formatted_token["currency"] = "ASTR"
+                line = line.replace('ASTR', '').strip()
+            else:
+                formatted_token["currency"] = "USD"
+                line = line.replace('$', '').strip()
+                
+            # Store the original price string (for reference)
+            formatted_token["price_string"] = line
+            
+            # Handle scientific notation with superscripts or subscripts
+            # Map common Unicode super/subscripts to standard ASCII
+            unicode_map = {
+                '\u2070': '0', '\u00B9': '1', '\u00B2': '2', '\u00B3': '3', '\u2074': '4',
+                '\u2075': '5', '\u2076': '6', '\u2077': '7', '\u2078': '8', '\u2079': '9',
+                '\u2080': '0', '\u2081': '1', '\u2082': '2', '\u2083': '3', '\u2084': '4',
+                '\u2085': '5', '\u2086': '6', '\u2087': '7', '\u2088': '8', '\u2089': '9',
+                '\u208A': '+', '\u208B': '-', '\u207A': '+', '\u207B': '-',
+                '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
+                '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9',
+                'ₓ': ''  # ₓ is a special subscript x that we can ignore
+            }
+            
+            # Replace all Unicode super/subscripts with standard ASCII
+            clean_line = line
+            for unicode_char, ascii_char in unicode_map.items():
+                clean_line = clean_line.replace(unicode_char, ascii_char)
+            
+            # Handle scientific notation (like "0.012707" where 5 is a subscript)
+            if re.search(r'0\.0(\d+)', clean_line):
+                try:
+                    # Extract the relevant parts
+                    match = re.search(r'0\.0(\d+)', clean_line)
+                    if match:
+                        digits = match.group(1)
+                        # Calculate the proper float value (with correct decimal places)
+                        price_value = float(f"0.0{digits}")
+                        formatted_token["price_value"] = price_value
+                    else:
+                        formatted_token["price_value"] = float(clean_line)
+                except (ValueError, TypeError):
+                    formatted_token["price_value"] = clean_line
+            else:
+                # Try normal float conversion for non-scientific notation
+                try:
+                    formatted_token["price_value"] = float(clean_line)
+                except (ValueError, TypeError):
+                    formatted_token["price_value"] = clean_line
+                
+        elif current_field == 'market_cap':
+            # Handle market cap
+            if 'ASTR' in line:
+                line = line.replace('ASTR', '').strip()
+            else:
+                line = line.replace('$', '').strip()
+                
+            # Remove commas
+            line = line.replace(',', '')
+            
+            # Try to convert to float
+            try:
+                formatted_token["market_cap"] = float(line)
+            except (ValueError, TypeError):
+                formatted_token["market_cap"] = line
+                
+        elif current_field == 'virtual_liquidity':
+            # Handle virtual liquidity
+            if 'ASTR' in line:
+                line = line.replace('ASTR', '').strip()
+            else:
+                line = line.replace('$', '').strip()
+                
+            # Remove commas
+            line = line.replace(',', '')
+            
+            # Try to convert to float
+            try:
+                formatted_token["virtual_liquidity"] = float(line)
+            except (ValueError, TypeError):
+                formatted_token["virtual_liquidity"] = line
+                
+        elif current_field == '24h_volume':
+            # Handle 24h volume
+            if 'ASTR' in line:
+                line = line.replace('ASTR', '').strip()
+            else:
+                line = line.replace('$', '').strip()
+            
+            # Handle special cases like "<$0.0001"
+            if line.startswith('<'):
+                line = line.replace('<', '')
+                formatted_token["24h_volume_is_less_than"] = True
+            else:
+                formatted_token["24h_volume_is_less_than"] = False
+                
+            # Remove commas
+            line = line.replace(',', '')
+            
+            # Try to convert to float
+            try:
+                formatted_token["24h_volume"] = float(line)
+            except (ValueError, TypeError):
+                formatted_token["24h_volume"] = line
+                
+        elif current_field == 'token_created' and i > 0:
+            # Handle token created time
+            if line == "--":
+                formatted_token["token_created"] = None
+                formatted_token["token_age_days"] = None
+            else:
+                formatted_token["token_created"] = line
+                # Parse days, hours, minutes format
+                try:
+                    age_parts = line.split(':')
+                    if len(age_parts) == 3:
+                        days = int(age_parts[0].replace('D', ''))
+                        hours = int(age_parts[1].replace('H', ''))
+                        minutes = int(age_parts[2].replace('M', ''))
+                        total_hours = days * 24 + hours + minutes / 60
+                        formatted_token["token_age_days"] = round(total_hours / 24, 2)
+                    else:
+                        formatted_token["token_age_days"] = None
+                except Exception:
+                    formatted_token["token_age_days"] = None
+    
+    # Keep the original text for reference
+    formatted_token["raw_text"] = token_info_text
+    
+    return formatted_token
+
+async def scrape_sonefi_tokens_async():
+    """
+    Main async function to scrape token data from all URLs in data/sonefi_links.json using concurrent tasks
+    """
+    try:
+        # Load URLs from the JSON file
+        links_file = os.path.join(DATA_DIR, 'sonefi_links.json')
+        with open(links_file, 'r') as f:
+            urls = json.load(f)
+        
+        logging.info(f"Loaded {len(urls)} URLs from {links_file}")
+        
+        # Setup Playwright
+        playwright, browser = await setup_browser()
+        if not browser:
+            logging.error("Failed to set up Playwright browser. Aborting.")
+            return []
+        
+        # Create a semaphore to limit concurrency
+        semaphore = asyncio.Semaphore(CONCURRENT_TASKS)
+        
+        # Create tasks for all URLs
+        tasks = []
+        for url in urls:
+            tasks.append(extract_token_data(browser, url, semaphore))
+        
+        # Execute tasks concurrently and gather results
+        logging.info(f"Starting concurrent scraping with {CONCURRENT_TASKS} workers")
+        start_time = time.time()
+        all_token_data = await asyncio.gather(*tasks)
+        end_time = time.time()
+        
+        logging.info(f"Concurrent scraping completed in {end_time - start_time:.2f} seconds")
+        
+        # Close Playwright resources
+        await browser.close()
+        await playwright.stop()
+        
+        # Save the collected data to a JSON file
+        output_file = os.path.join(DATA_DIR, 'sonefi_tokens.json')
+        with open(output_file, 'w') as f:
+            json.dump(all_token_data, f, indent=2)
+        
+        logging.info(f"Scraping completed. Formatted token info data saved to {output_file}")
+        print(f"Scraping completed. Extracted and formatted token info for {len(all_token_data)} tokens in {end_time - start_time:.2f} seconds.")
+        
+        return all_token_data
+        
+    except Exception as e:
+        logging.error(f"Error in scrape_sonefi_tokens_async: {e}")
+        if 'browser' in locals() and browser:
+            await browser.close()
+        if 'playwright' in locals() and playwright:
+            await playwright.stop()
+        return []
+
+async def scrape_sonefi_tokens():
+    """
+    Fixed wrapper function that can be called from an existing async context
+    """
+    return await scrape_sonefi_tokens_async()
+
+# For direct script execution
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(scrape_sonefi_tokens_async())

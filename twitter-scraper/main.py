@@ -1,216 +1,162 @@
 #!/usr/bin/env python3
 """
-Main entry point for the cryptocurrency analysis system.
-Scheduled execution:
-- SaucerSwap token scraper: runs every 30 seconds
-- Sonefi.xyz memeLaunch scraper: runs every 15 minutes
-- Twitter scraper + Gemini analysis: runs every hour (independent of token updates)
+Main entry point for the Twitter scraper and cryptocurrency analyzer
 """
+
 import asyncio
-import logging
 import os
-import json
-import time
-from datetime import datetime, timedelta
-from playwright.async_api import async_playwright
+import logging
+import sys
+from datetime import datetime
 
-# Import components from our module
-from scraper import main as run_token_scraper, scrape_sonefi_memeLaunch
-from twitter import scrape_twitter_for_coins
-from gemini_analyzer import analyze_sentiment_with_gemini
-
-# Configure logging
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(SCRIPT_DIR, "data")
-LOG_DIR = SCRIPT_DIR  # Keep logs in main directory
-LOG_FILE = os.path.join(LOG_DIR, "crypto_analysis.log")
-
-# Create data directory if it doesn't exist
-os.makedirs(DATA_DIR, exist_ok=True)
+# Set up logging
+log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "crypto_analysis.log")
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger("main")
 
-# Scheduling intervals
-SAUCERSWAP_INTERVAL = 30  # 30 seconds between SaucerSwap scraper runs
-SONEFI_INTERVAL = 900     # 15 minutes between Sonefi scraper runs
-TWITTER_INTERVAL = 3600   # 1 hour between Twitter scraper runs
+logger = logging.getLogger(__name__)
 
-async def run_saucerswap_scraper():
-    """Run the SaucerSwap token scraper and return the token data"""
+def print_header():
+    """Print a header for the application"""
+    print("\n" + "="*60)
+    print(" SONEFI CRYPTO TWITTER ANALYZER ".center(60, "="))
+    print(" Powered by Gemini AI ".center(60, "="))
+    print("="*60)
+    print(f" Run started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ".center(60, "-"))
+    print("="*60 + "\n")
+
+async def run_scraper():
+    """Run the Twitter scraper and analyzer"""
     try:
-        logger.info("Running SaucerSwap token scraper...")
-        token_data = await run_token_scraper(headless=True, output_dir=DATA_DIR)
-        logger.info(f"Token scraper complete. Found {len(token_data)} tokens")
-        return token_data
-    except Exception as e:
-        logger.error(f"Error in SaucerSwap scraper: {e}", exc_info=True)
-        return None
-
-async def run_sonefi_scraper():
-    """Run the Sonefi memeLaunch scraper and return the token data"""
-    try:
-        logger.info("Running Sonefi memeLaunch scraper...")
+        # Import here to avoid circular imports
+        from twitter import scrape_twitter_for_coins
+        from scraper import scrape_sonefi_tokens
+        import shutil  # For file copying
         
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(viewport={"width": 1366, "height": 768})
-            page = await context.new_page()
-            
-            # Scrape 4 pages of the Sonefi memeLaunch section
-            tokens = await scrape_sonefi_memeLaunch(page, max_pages=4)
-            
-            await browser.close()
-            
-            # Save the tokens to a specific file
-            sonefi_file = os.path.join(DATA_DIR, "sonefi_tokens.json")
-            with open(sonefi_file, 'w', encoding='utf-8') as f:
-                json.dump(tokens, f, indent=2)
-            
-            logger.info(f"Sonefi scraper complete. Found {len(tokens)} tokens")
-            return tokens
-            
-    except Exception as e:
-        logger.error(f"Error in Sonefi memeLaunch scraper: {e}", exc_info=True)
-        return None
-
-async def run_twitter_and_analysis():
-    """Run the Twitter scraper and then the Gemini analysis"""
-    try:
-        logger.info("Running Twitter scraper...")
-        twitter_success = await scrape_twitter_for_coins()
+        print_header()
+        logger.info("Starting Sonefi Twitter scraper and analyzer")
         
-        if not twitter_success:
-            logger.error("Twitter scraper encountered errors. Check twitter_scraper.log for details")
-            return False
+        # Step 1: Scrape token data from SoneFi
+        logger.info("Step 1: Scraping token data from SoneFi...")
+        await scrape_sonefi_tokens()
+        logger.info("SoneFi token scraping complete")
         
-        logger.info("Twitter scraper complete. Checking analysis results...")
+        # Step 2: Run the Twitter scraper and analyzer
+        logger.info("Step 2: Scraping Twitter and analyzing tokens...")
+        await scrape_twitter_for_coins()
         
-        # Check if analysis results are available (generated by the Twitter scraper's analyze_coin_data function)
-        analysis_file = os.path.join(DATA_DIR, "coin_investment_analysis.json")
-        if os.path.exists(analysis_file):
+        logger.info("Scraping and analysis complete")
+        
+        # Step 3: Copy output files to the frontend directory
+        logger.info("Step 3: Copying data files to frontend directory...")
+        frontend_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                                      "frontend", "public", "data")
+        
+        if not os.path.exists(frontend_data_dir):
+            os.makedirs(frontend_data_dir, exist_ok=True)
+            logger.info(f"Created directory: {frontend_data_dir}")
+        
+        # Files to copy
+        files_to_copy = [
+            "sonefi_tokens.json",
+            "coin_investment_analysis.json"
+        ]
+        
+        for filename in files_to_copy:
+            src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", filename)
+            dest_path = os.path.join(frontend_data_dir, filename)
+            
             try:
-                with open(analysis_file, 'r', encoding='utf-8') as f:
-                    analysis_data = json.load(f)
-                
-                # Print summary of top coins
-                top_coins = analysis_data.get("top_investment_coins", [])
-                logger.info(f"Analysis identified {len(top_coins)} top investment opportunities")
-                
-                print("\n===== TOP INVESTMENT OPPORTUNITIES =====")
-                for i, coin in enumerate(top_coins[:5], 1):  # Show top 5
-                    print(f"{i}. {coin['symbol']} - Score: {coin.get('investment_score', 0):.2f}")
-                print("======================================\n")
-                
-                return True
+                if os.path.exists(src_path):
+                    shutil.copy2(src_path, dest_path)
+                    logger.info(f"Copied {src_path} to {dest_path}")
+                else:
+                    logger.warning(f"Source file not found: {src_path}")
             except Exception as e:
-                logger.error(f"Error reading analysis results: {e}")
-                return False
+                logger.error(f"Error copying file {filename}: {e}")
+        
+        print("\n" + "="*60)
+        print(" Analysis complete! ".center(60, "="))
+        print(" Data copied to frontend directory ".center(60, "-"))
+        print("="*60 + "\n")
+    except Exception as e:
+        logger.error(f"Error running scraper: {e}", exc_info=True)
+        print("\n[ERROR] An error occurred while running the scraper. Check the logs for details.")
+        return False
+    
+    return True
+
+async def update_sonefi_data():
+    """Update Sonefi token data by running the scraper"""
+    try:
+        # Import here to avoid circular imports
+        from scraper import scrape_sonefi_tokens_async
+        import shutil  # For file copying
+        
+        print("\n" + "="*60)
+        print(" UPDATING SONEFI TOKEN DATA ".center(60, "="))
+        print("="*60 + "\n")
+        
+        logger.info("Starting Sonefi token scraper")
+        
+        # Run the scraper
+        result = await scrape_sonefi_tokens_async()
+        
+        if result:
+            logger.info(f"Successfully scraped {len(result)} Sonefi tokens")
+            
+            # Copy updated data to frontend directory
+            logger.info("Copying updated data to frontend directory...")
+            frontend_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                                          "frontend", "public", "data")
+            
+            if not os.path.exists(frontend_data_dir):
+                os.makedirs(frontend_data_dir, exist_ok=True)
+                logger.info(f"Created directory: {frontend_data_dir}")
+            
+            src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sonefi_tokens.json")
+            dest_path = os.path.join(frontend_data_dir, "sonefi_tokens.json")
+            
+            try:
+                if os.path.exists(src_path):
+                    shutil.copy2(src_path, dest_path)
+                    logger.info(f"Copied {src_path} to {dest_path}")
+                else:
+                    logger.warning(f"Source file not found: {src_path}")
+            except Exception as e:
+                logger.error(f"Error copying file: {e}")
+            
+            print(f"\n[SUCCESS] Updated data for {len(result)} Sonefi tokens!")
+            print(f"[INFO] Data copied to frontend directory")
         else:
-            logger.warning("No analysis results found. The analysis may have failed")
+            logger.error("Failed to scrape Sonefi tokens")
+            print("\n[ERROR] Failed to update Sonefi token data. Check the logs for details.")
             return False
             
     except Exception as e:
-        logger.error(f"Error in Twitter scraper and analysis: {e}", exc_info=True)
+        logger.error(f"Error updating Sonefi data: {e}", exc_info=True)
+        print("\n[ERROR] An error occurred while updating Sonefi data. Check the logs for details.")
         return False
-
-async def scheduled_execution():
-    """
-    Run components on scheduled intervals:
-    - SaucerSwap scraper: every 30 seconds
-    - Sonefi memeLaunch scraper: every 15 minutes
-    - Twitter scraper + Gemini analysis: every hour (independent of token updates)
-    """
-    logger.info("Starting scheduled execution")
-    print("Cryptocurrency analysis pipeline is now running on schedule:")
-    print(f"- SaucerSwap scraper: every {SAUCERSWAP_INTERVAL} seconds")
-    print(f"- Sonefi memeLaunch scraper: every {SONEFI_INTERVAL/60} minutes")
-    print(f"- Twitter scraper + Gemini analysis: every {TWITTER_INTERVAL/3600} hour(s)")
-    print(f"- All JSON files will be stored in: {DATA_DIR}")
-    
-    # Set up independent timers for each component
-    next_saucerswap_run = datetime.now()
-    next_sonefi_run = datetime.now()
-    next_twitter_run = datetime.now() + timedelta(seconds=TWITTER_INTERVAL)
-    
-    while True:
-        current_time = datetime.now()
         
-        # Check if it's time to run the SaucerSwap scraper
-        if current_time >= next_saucerswap_run:
-            await run_saucerswap_scraper()
-            next_saucerswap_run = current_time + timedelta(seconds=SAUCERSWAP_INTERVAL)
-        
-        # Check if it's time to run the Sonefi memeLaunch scraper
-        if current_time >= next_sonefi_run:
-            await run_sonefi_scraper()
-            next_sonefi_run = current_time + timedelta(seconds=SONEFI_INTERVAL)
-        
-        # Check if it's time to run the Twitter scraper (independently)
-        if current_time >= next_twitter_run:
-            logger.info(f"Running scheduled Twitter scraper and analysis at {current_time.isoformat()}")
-            await run_twitter_and_analysis()
-            next_twitter_run = current_time + timedelta(seconds=TWITTER_INTERVAL)
-            logger.info(f"Next Twitter run scheduled for {next_twitter_run.isoformat()}")
-        
-        # Calculate time until next runs
-        time_until_next_saucerswap = (next_saucerswap_run - datetime.now()).total_seconds()
-        time_until_next_sonefi = (next_sonefi_run - datetime.now()).total_seconds()
-        time_until_next_twitter = (next_twitter_run - datetime.now()).total_seconds()
-        
-        # Wait until the next task that needs to run (whichever comes first)
-        sleep_time = min(
-            max(0.1, time_until_next_saucerswap),  # Ensure positive sleep time
-            max(0.1, time_until_next_sonefi),      # Ensure positive sleep time
-            max(0.1, time_until_next_twitter)      # Ensure positive sleep time
-        )
-        
-        # Log next scheduled runs
-        logger.debug(f"Next SaucerSwap run in {time_until_next_saucerswap:.1f} seconds")
-        logger.debug(f"Next Sonefi run in {time_until_next_sonefi:.1f} seconds")
-        logger.debug(f"Next Twitter run in {time_until_next_twitter:.1f} seconds")
-        
-        # Sleep until the next task needs to run
-        await asyncio.sleep(sleep_time)
+    return True
 
 async def main():
-    """
-    Main function that starts the scheduled execution
-    """
-    start_time = datetime.now()
-    logger.info(f"Starting cryptocurrency analysis pipeline at {start_time.isoformat()}")
-    
-    try:
-        # Initial run of SaucerSwap scraper
-        await run_saucerswap_scraper()
-        
-        # Initial run of Sonefi memeLaunch scraper
-        logger.info("Running initial Sonefi memeLaunch scraper...")
-        await run_sonefi_scraper()
-        
-        # Initial run of Twitter scraper and analysis
-        logger.info("Running initial Twitter scraper and analysis...")
-        await run_twitter_and_analysis()
-        
-        # Start scheduled execution with independent timers
-        logger.info("Starting scheduled execution with independent timers")
-        await scheduled_execution()
-        
-    except KeyboardInterrupt:
-        logger.info("Stopping cryptocurrency analysis pipeline due to user interrupt")
-        print("\nStopping cryptocurrency analysis pipeline. Goodbye!")
-    except Exception as e:
-        logger.error(f"Error in cryptocurrency analysis pipeline: {e}", exc_info=True)
-        print(f"Error: {e}")
-        print(f"Check log file for details: {LOG_FILE}")
+    """Main entry point"""
+    if len(sys.argv) > 1 and sys.argv[1] == "--update-data":
+        # Update Sonefi token data
+        await update_sonefi_data()
+    else:
+        # Run the Twitter scraper and analyzer
+        await run_scraper()
 
 if __name__ == "__main__":
-    print("Starting cryptocurrency analysis pipeline with scheduled execution...")
     asyncio.run(main())

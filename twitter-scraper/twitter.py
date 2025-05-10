@@ -16,8 +16,8 @@ import time
 from dotenv import load_dotenv
 import random
 
-# Import the Gemini analyzer using absolute import instead of relative import
-from gemini_analyzer import analyze_sentiment_with_gemini
+# Analysis functionality has been moved to gemini_analyzer.py
+# Import removed since analysis is handled separately
 
 # Load environment variables from .env file
 load_dotenv()
@@ -34,14 +34,16 @@ logger = logging.getLogger(__name__)
 
 # Path to Twitter cookies file
 COOKIES_FILE = os.path.join(DATA_DIR, "twitter_cookies.json")
-# Path to hedra data file
-HEDRA_DATA_FILE = os.path.join(DATA_DIR, "tokens_structured.json")
+# Path to token data file
+TOKEN_DATA_FILE = os.path.join(DATA_DIR, "tokens_structured.json")
+# Path to SoneFi tokens file
+SONEFI_TOKENS_FILE = os.path.join(DATA_DIR, "sonefi_tokens.json")
 # Path to output Twitter data file
 TWITTER_DATA_FILE = os.path.join(DATA_DIR, "twitter_coin_data.json")
 # Path to analysis output file
 ANALYSIS_OUTPUT_FILE = os.path.join(DATA_DIR, "coin_investment_analysis.json")
 
-def load_helix_data():
+def load_token_data():
     """
     Load coin data from tokens_structured.json
     
@@ -49,33 +51,77 @@ def load_helix_data():
         dict: Loaded coin data or None if error
     """
     try:
-        with open(HEDRA_DATA_FILE, 'r', encoding="utf-8") as f:
+        with open(TOKEN_DATA_FILE, 'r', encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         logger.error(f"Error loading tokens_structured.json: {e}")
         return None
 
-def extract_coin_symbols(helix_data):
+def load_sonefi_tokens():
     """
-    Extract coin symbols from helix data
+    Load token data from sonefi_tokens.json
+    
+    Returns:
+        dict: Loaded SoneFi token data or None if error
+    """
+    try:
+        with open(SONEFI_TOKENS_FILE, 'r', encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading sonefi_tokens.json: {e}")
+        return None
+
+def extract_sonefi_token_info(sonefi_tokens):
+    """
+    Extract token names and symbols from SoneFi tokens data
     
     Args:
-        helix_data (dict): The loaded helix/token data
+        sonefi_tokens (list): The loaded SoneFi token data
+        
+    Returns:
+        tuple: (list of token names, list of token symbols)
+    """
+    token_names = []
+    token_symbols = []
+    
+    if not sonefi_tokens:
+        logger.warning("No SoneFi tokens data to extract information from")
+        return token_names, token_symbols
+    
+    for token in sonefi_tokens:
+        # Skip entries with error or missing required fields
+        if 'error' in token or 'token_name' not in token or 'token_symbol' not in token:
+            continue
+            
+        if 'token_name' in token:
+            token_names.append(token['token_name'])
+        if 'token_symbol' in token:
+            token_symbols.append(token['token_symbol'])
+    
+    logger.info(f"Extracted {len(token_names)} token names and {len(token_symbols)} token symbols from SoneFi tokens data")
+    return token_names, token_symbols
+
+def extract_coin_symbols(token_data):
+    """
+    Extract coin symbols from token data
+    
+    Args:
+        token_data (dict): The loaded token data
         
     Returns:
         list: Extracted coin symbols
     """
     coins = []
-    if not helix_data:
+    if not token_data:
         return coins
     
-    for item in helix_data:
+    for item in token_data:
         if 'symbol' in item:
             # Extract the coin part before /INJ
             symbol = item['symbol'].split('/')[0]
             coins.append(symbol)
     
-    logger.info(f"Extracted {len(coins)} coin symbols from helix data")
+    logger.info(f"Extracted {len(coins)} coin symbols from token data")
     return coins
 
 def normalize_cookies(cookies):
@@ -298,145 +344,27 @@ async def search_twitter_for_coin(page, coin_symbol):
         logger.error(f"Error searching Twitter for {coin_symbol}: {e}")
         return []
 
-def analyze_coin_data(helix_data, twitter_data):
-    """
-    Analyze coin data from helix and Twitter to find top investment opportunities
-    
-    Args:
-        helix_data (dict): The loaded helix/token data
-        twitter_data (dict): The scraped Twitter data
-        
-    Returns:
-        list: Sorted list of top coins based on investment score
-    """
-    coin_analysis = {}
-    helix_coins_map = {}
-    
-    # Create a map of coin symbols to helix data
-    for item in helix_data:
-        symbol = item['symbol'].split('/')[0]
-        price_str = item['price']
-        
-        # Handle price formatting issues
-        try:
-            # Remove commas and any other non-numeric characters except decimal points
-            clean_price = re.sub(r'[^\d.]', '', price_str)
-            price = float(clean_price) if clean_price else 0.0
-        except (ValueError, TypeError):
-            price = 0.0
-        
-        change_str = item['change_24h']
-        
-        # Convert change_24h to float robustly
-        if isinstance(change_str, str):
-            change = float(change_str.strip('%')) if change_str != 'N/A' else 0.0
-        elif isinstance(change_str, (int, float)):
-            change = float(change_str)
-        else:
-            change = 0.0
-        
-        helix_coins_map[symbol] = {
-            'price': price,
-            'change_24h': change
-        }
-    
-    logger.info(f"Created helix_coins_map with {len(helix_coins_map)} coins")
-    
-    # Process Twitter data - extract coin tweets and their analysis
-    coin_tweets = {}
-    coin_analysis_data = {}
-    
-    # Debug print of twitter_data keys
-    logger.info(f"Twitter data keys: {list(twitter_data.keys())[:20]}...")
-    
-    for key, value in twitter_data.items():
-        if key.endswith('_analysis'):
-            # This is an analysis entry - extract the coin symbol
-            coin_symbol = key.replace('_analysis', '')
-            coin_analysis_data[coin_symbol] = value
-            logger.info(f"Found analysis for {coin_symbol}: {value.keys()}")
-        elif isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict) and 'coin_symbol' in value[0]:
-            # This is a tweet list
-            coin_symbol = value[0]['coin_symbol']
-            coin_tweets[coin_symbol] = value
-            logger.info(f"Found {len(value)} tweets for {coin_symbol}")
-    
-    logger.info(f"Extracted data for {len(coin_tweets)} coins with tweets and {len(coin_analysis_data)} coins with analysis")
-    
-    # Now we can analyze each coin that has both tweets and analysis
-    analyzed_coins = []
-    
-    for coin_symbol, tweets in coin_tweets.items():
-        logger.info(f"Analyzing {coin_symbol} with {len(tweets)} tweets")
-        
-        # Skip if we don't have analysis data
-        if coin_symbol not in coin_analysis_data:
-            logger.info(f"Skipping {coin_symbol}: no analysis data")
-            continue
-            
-        # Skip if coin not in helix data (for price information)
-        if coin_symbol not in helix_coins_map:
-            logger.info(f"Skipping {coin_symbol}: not found in helix_coins_map")
-            continue
-            
-        # Get price and change data
-        price = helix_coins_map[coin_symbol]['price']
-        change = helix_coins_map[coin_symbol]['change_24h']
-        
-        # Get sentiment and analysis from Gemini
-        analysis = coin_analysis_data[coin_symbol]
-        
-        sentiment_score = analysis.get('sentiment_score', 0)
-        investment_analysis = analysis.get('investment_analysis', 'No analysis available')
-        key_factors = analysis.get('key_factors', [])
-        
-        # Calculate investment score (simple example - customize for your needs)
-        # Here we're weighing sentiment heavily and also considering price change
-        investment_score = (sentiment_score * 0.7) + (change / 100 * 0.3)
-        
-        logger.info(f"{coin_symbol}: price=${price}, change={change}%, sentiment={sentiment_score}, investment_score={investment_score:.2f}")
-        
-        # Add to analyzed coins
-        analyzed_coins.append({
-            'symbol': coin_symbol,
-            'price': price,
-            'change_24h': change,
-            'num_tweets': len(tweets),
-            'sentiment_score': sentiment_score,
-            'investment_score': investment_score,
-            'investment_analysis': investment_analysis,
-            'key_factors': key_factors
-        })
-    
-    # Sort coins by investment score (descending)
-    analyzed_coins.sort(key=lambda x: x.get('investment_score', 0), reverse=True)
-    
-    # Get top N coins (adjust this number as needed)
-    top_n = 10
-    top_coins = analyzed_coins[:top_n] if len(analyzed_coins) > top_n else analyzed_coins
-    
-    logger.info(f"Analysis complete. Found {len(analyzed_coins)} analyzed coins")
-    logger.info(f"Top {len(top_coins)} coins: {[c['symbol'] for c in top_coins]}")
-    
-    return top_coins
+# Analysis functionality has been moved to gemini_analyzer.py
 
 async def scrape_twitter_for_coins():
     """
-    Scrape Twitter for the coin data from the loaded coins list
+    Scrape Twitter for the coin data from the loaded SoneFi tokens list
     
     Returns:
         bool: True if scraping was successful
     """
     start_time = time.time()
     
-    helix_data = load_helix_data()
-    if not helix_data:
-        logger.error("No helix data found. Please run helix_scraper.py first.")
+    # Load SoneFi tokens instead of tokens_structured.json
+    sonefi_tokens = load_sonefi_tokens()
+    if not sonefi_tokens:
+        logger.error("No SoneFi token data found. Please check sonefi_tokens.json file.")
         return False
     
-    coin_symbols = extract_coin_symbols(helix_data)
+    # Extract token names and symbols
+    _, coin_symbols = extract_sonefi_token_info(sonefi_tokens)
     if not coin_symbols:
-        logger.error("No coin symbols found in helix data.")
+        logger.error("No token symbols found in SoneFi token data.")
         return False
     
     logger.info(f"Starting Twitter scraper for {len(coin_symbols)} coins")
@@ -510,33 +438,14 @@ async def scrape_twitter_for_coins():
                         # Store the tweets in our result
                         twitter_data[coin] = tweets
                         
-                        # Analyze tweets with Gemini
-                        tweets_text = "\n\n".join([t["text"] for t in tweets])
-                        try:
-                            # Only analyze if we have tweets
-                            if tweets_text.strip():
-                                # Apply rate limiting for API key usage
-                                analysis = analyze_sentiment_with_gemini(tweets_text, coin)
-                                
-                                if analysis:
-                                    logger.info(f"Analyzed {len(tweets)} tweets for {coin}")
-                                    
-                                    # Update the twitter data with the analysis
-                                    twitter_data[coin] = [
-                                        {**tweet, "analyzed": True}
-                                        for tweet in twitter_data[coin]
-                                    ]
-                                    
-                                    # Add analysis to the coin data
-                                    twitter_data[f"{coin}_analysis"] = {
-                                        "sentiment_score": analysis["sentiment_score"],
-                                        "investment_analysis": analysis.get("investment_analysis", analysis.get("analysis", "No analysis")),
-                                        "key_factors": analysis.get("key_factors", []),
-                                    }
-                                else:
-                                    logger.warning(f"Failed to analyze tweets for {coin}")
-                        except Exception as e:
-                            logger.error(f"Error analyzing tweets for {coin}: {e}")
+                        # Store raw tweets without analysis - gemini_analyzer.py will be used separately
+                        logger.info(f"Stored {len(tweets)} tweets for {coin}")
+                        
+                        # Mark these tweets as not analyzed yet
+                        twitter_data[coin] = [
+                            {**tweet, "analyzed": False}
+                            for tweet in twitter_data[coin]
+                        ]
                     
                     processed_count += 1
                     
@@ -569,34 +478,20 @@ async def scrape_twitter_for_coins():
             except Exception as e:
                 logger.error(f"Error closing browser: {e}")
     
-    # Analyze the data if we have tweets
+    # Just save the tweet data, no analysis (use gemini_analyzer.py separately)
     if twitter_data:
-        logger.info("Starting coin analysis with Gemini API")
-        top_coins = analyze_coin_data(helix_data, twitter_data)
+        logger.info(f"Twitter data collection complete. Found tweets for {len(twitter_data)} coins")
+        logger.info(f"Twitter data saved to {TWITTER_DATA_FILE}")
         
-        # Save analysis results
-        analysis_result = {
-            "top_investment_coins": top_coins,
-            "analysis_timestamp": datetime.now().isoformat(),
-            "total_coins_analyzed": len(coin_symbols),
-            "total_tweets_analyzed": sum(len(tweets) for key, tweets in twitter_data.items() 
-                                         if isinstance(tweets, list) and not key.endswith('_analysis'))
-        }
-        
-        with open(ANALYSIS_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(analysis_result, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Analysis complete. Top {len(top_coins)} coins saved to {ANALYSIS_OUTPUT_FILE}")
-        
-        # Print top coins to console
-        print("\n===== TOP COINS TO INVEST IN =====")
-        for i, coin in enumerate(top_coins, 1):
-            print(f"{i}. {coin['symbol']} - Price: ${coin['price']:.6f} - Change: {coin['change_24h']}%")
-            print(f"   Score: {coin.get('investment_score', 0):.2f} | Sentiment: {coin.get('sentiment_score', 0):.2f}")
-            print(f"   Analysis: {coin.get('investment_analysis', '')}")
-            print(f"   Key factors: {', '.join(coin.get('key_factors', [])) if coin.get('key_factors') else 'None identified'}")
-            print()
-        print("=================================\n")
+        # Print summary to console
+        print("\n===== TWITTER DATA COLLECTION SUMMARY =====")
+        print(f"Collected tweets for {len(twitter_data)} coins")
+        total_tweets = sum(len(tweets) for key, tweets in twitter_data.items() 
+                          if isinstance(tweets, list) and not key.endswith('_analysis'))
+        print(f"Total tweets collected: {total_tweets}")
+        print(f"Data saved to: {TWITTER_DATA_FILE}")
+        print("\nTo analyze this data, please run gemini_analyzer.py")
+        print("===========================================\n")
     
     return True
 
@@ -615,8 +510,14 @@ async def main():
             ]
         )
     
-    logger.info("Starting Twitter coin scraper and analyzer with Gemini AI")
-    await scrape_twitter_for_coins()
+    logger.info("Starting Twitter coin scraper and data collection")
+    success = await scrape_twitter_for_coins()
+    
+    if success:
+        print("\n===== TWITTER DATA COLLECTION COMPLETE =====")
+        print("To analyze the collected data, please run:")
+        print("python3 gemini_analyzer.py")
+        print("===========================================\n")
 
 if __name__ == "__main__":
     asyncio.run(main())
